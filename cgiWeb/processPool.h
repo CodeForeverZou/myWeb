@@ -68,7 +68,7 @@ public:
 
 // 单例模式：对静态变量初始化
 template<typename T> 
-processPool<T>* processPool<T>:::m_instance = NULL;
+processPool<T>* processPool<T>::m_instance = NULL;
 // 定义全局的 信号管道
 static int sig_pipefd[2];
 
@@ -113,7 +113,7 @@ static int setNonBlocking(int fd){
 static void addfd(int epollfd, int fd){
     epoll_event event;
     event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET // 边缘模式
+    event.events = EPOLLIN | EPOLLET; // 边缘模式
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
     setNonBlocking(fd);
 }
@@ -210,18 +210,168 @@ void processPool<T>::run_child(){
         {
             
             int sockfd = events[i].data.fd;
-            // 读就绪事件
+            // 连接事件
             if((sockfd == pipefd) && (events[i].events & EPOLLIN)){
-                
+                int client = 0;
+                ret = recv(sockfd, (char*)&client, sizeof(client), 0);
+                if(((ret < 0) && (errno != EAGAIN)) || ret == 0)
+                    continue;
+                else{
+                    struct sockaddr_in clientAddr;
+                    socklen_t clientAddrLen = sizeof(clientAddr);
+                    // 建立连接
+                    int connfd = accept(m_listenfd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+                    if(connfd < 0){
+                        printf("errno is %d\n", errno);
+                        continue;
+                    }
+                    addfd(m_epollfd, connfd);
+                    // 调用对应模板中的init 初始化客户
+                    users[connfd].init(m_epollfd, connfd, clientAddr);
+                }
             }
             // 信号事件
-            // 客户初始连接
+            else if((sockfd == sig_pipefd[0]) && (events[i].events & EPOLLIN)){
+                int sig;
+                char signals[1024];
+                // 读取信号
+                ret = recv(sig_pipefd[0], signal, sizeof(signals), 0);
+                if(ret <= 0)
+                    continue;
+                else{
+                    for(int i = 0; i < ret; i++){
+                        switch (signals[i])
+                        {
+                            case SIGCHLD:{
+                                pid_t pid;
+                                int stat;
+                                // 等待子进程结束
+                                while ((pid == waitpid(-1, &stat, WNOHANG)) > 0)
+                                    continue;
+                                break;
+                            }
+                            case SIGTERM:
+                            case SIGINT:{
+                                m_stop = true;
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                    }// for sig
+                }// if ret
+            }
+            // 读就绪事件，客户
+            else if(events[i].events & EPOLLIN){
+                // 对应模板自己的处理函数
+                users[sockfd].process();
+            }
             // 其他事件
-        }
-        
+            else
+                continue;
+        }// for epfd
     }
     
+    delete [] users;
+    users = NULL;
+    close(pipefd);
+    // close(m_listenfd)  由模板自己处理
+    close(m_epollfd);
+}
 
+// 父进程函数
+template <typename T>
+void processPool<T>::run_parent(){
+    // 统一事件源
+    setup_sig_pipe();
+    addfd(m_epollfd, m_listenfd);
+
+    epoll_event events[MAX_EVENT_NUMBER];
+    int sub_process_counter = 0;
+    int new_conn = 1, number = 0, ret = -1;
+
+    while (!m_stop)
+    {
+        // 监听就绪好的 事件
+        number = epoll_wait(m_epollfd, events, MAX_EVENT_NUMBER, -1);
+        if((number < 0) && (errno != EINTR)){
+            printf("epoll failure\n");
+            break;
+        }
+        for (int i = 0; i < number; i++)
+        {
+            int sockfd = events[i].data.fd;
+            if(sockfd == m_listenfd){
+                int i = sub_process_counter;
+                do{
+                    if(m_sub_process[i].m_pid != -1)
+                        break;
+                    i = (i+1) % m_process_number;
+                }while(i != sub_process_counter);
+
+                if (m_sub_process[i].m_pid == -1){
+                    m_stop = true;
+                    break;
+                }
+                sub_process_counter = (i+1) % m_process_number;
+                // 发送消息
+                send(m_sub_process[i].m_pipefd[0], (char*)&new_conn, sizeof(new_conn), 0);
+                printf("send request to clild %d\n", i);
+
+            }
+            else if((sockfd == sig_pipefd[0]) && (events[i].events & EPOLLIN)){
+                int sig;
+                char signals[1024];
+                ret = recv(sig_pipefd[0], signals, sizeof(signals), 0);
+                if(ret <= 0)
+                    continue;
+                else{
+                    for (int i = 0; i < ret; i++)
+                    {
+                        switch (signals[i])
+                        {
+                        case SIGCHLD:{
+                            pid_t pid;
+                            int stat;
+                            while ((pid = waitpid(-1, &stat, WNOHANG)) > 0 ){
+                                for (int i = 0; i < m_process_number; i++){
+                                    if(m_sub_process[i].m_pid == pid){
+                                        printf("chlid %d join\n", i);
+                                        close(m_sub_process[i].m_pipefd[0]);    // 关闭读
+                                        m_sub_process[i].m_pid = -1;
+                                    }
+                                }
+                            }
+                            m_stop = true;
+                            for (int i = 0; i < m_process_number; i++){
+                                if(m_sub_process[i].m_pid != -1)
+                                    m_stop = false;
+                            }
+                            break;
+                        }
+                        case SIGTERM;
+                        case SIGINT:{
+                            printf("kill all the child now\n");
+                            for (int i = 0; i < m_process_number; i++)
+                            {
+                                int pid = m_sub_process[i].m_pid;
+                                if(pid != -1)
+                                    kill(pid, SIGTERM);
+                            }
+                            break;
+                        }
+                        default:
+                            break;
+                        }
+                    }// for i in sig
+                }// if ret
+            }
+            else
+                continue;
+        }// for epfd
+    }
+    
+    close(m_epollfd);
 }
 
 #endif
