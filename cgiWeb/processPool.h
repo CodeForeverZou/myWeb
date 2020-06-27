@@ -57,7 +57,7 @@ public:
     // processPool(); 单例模式 !!!
     static processPool<T>* create(int listenfd, int process_number = 8){
         if (!m_instance)
-            processPool(listenfd, process_number);
+            m_instance = new processPool<T>(listenfd, process_number);
         return m_instance;
     }
     ~processPool(){
@@ -84,11 +84,12 @@ processPool<T>::processPool(int listenfd, int process_number)
 
     for(int i = 0; i < process_number; i++){
         // 父子进程 建立 管道通信
-        int ret = socketpair(PF_UNIX, SOCK_STREAM, m_sub_process[i].m_pipefd);
+        int ret = socketpair(PF_UNIX, SOCK_STREAM, 0, m_sub_process[i].m_pipefd );
         assert(ret == 0);
         // 创建 子进程
         m_sub_process[i].m_pid = fork();
         assert(m_sub_process[i].m_pid >= 0);
+        printf("%d %d %d\n",i, process_number, m_sub_process[i].m_pid);
         if (m_sub_process[i].m_pid > 0){
             close(m_sub_process[i].m_pipefd[1]);    // 关闭读就绪
             continue;
@@ -170,7 +171,8 @@ void processPool<T>::setup_sig_pipe(){
     addfd(m_epollfd, sig_pipefd[0]);    // 设置读就绪
 
     // 安装信号
-    addsig(SIGCHLD， sigHandler);
+    // addsig( SIGCHLD, sigHandler );
+    addsig(SIGCHLD, sigHandler);
     addsig(SIGTERM, sigHandler);
     addsig(SIGINT, sigHandler);
     addsig(SIGPIPE, SIG_IGN);   // 忽略
@@ -208,7 +210,7 @@ void processPool<T>::run_child(){
         }
         for (int i = 0; i < number; i++)
         {
-            
+            // printf("the %d events\n", i);
             int sockfd = events[i].data.fd;
             // 连接事件
             if((sockfd == pipefd) && (events[i].events & EPOLLIN)){
@@ -235,7 +237,7 @@ void processPool<T>::run_child(){
                 int sig;
                 char signals[1024];
                 // 读取信号
-                ret = recv(sig_pipefd[0], signal, sizeof(signals), 0);
+                ret = recv(sig_pipefd[0], signals, sizeof(signals), 0);
                 if(ret <= 0)
                     continue;
                 else{
@@ -300,21 +302,23 @@ void processPool<T>::run_parent(){
         }
         for (int i = 0; i < number; i++)
         {
+            // printf("parent %d \n",i);
             int sockfd = events[i].data.fd;
             if(sockfd == m_listenfd){
+                // 使用环算法 分派子进程
                 int i = sub_process_counter;
                 do{
                     if(m_sub_process[i].m_pid != -1)
                         break;
                     i = (i+1) % m_process_number;
                 }while(i != sub_process_counter);
-
+                // 如果子进程都是关闭状态，则父进程也退出
                 if (m_sub_process[i].m_pid == -1){
                     m_stop = true;
                     break;
                 }
                 sub_process_counter = (i+1) % m_process_number;
-                // 发送消息
+                // 给子进程发送消息，通知处理网络连接
                 send(m_sub_process[i].m_pipefd[0], (char*)&new_conn, sizeof(new_conn), 0);
                 printf("send request to clild %d\n", i);
 
@@ -333,8 +337,10 @@ void processPool<T>::run_parent(){
                         case SIGCHLD:{
                             pid_t pid;
                             int stat;
+                            //
                             while ((pid = waitpid(-1, &stat, WNOHANG)) > 0 ){
                                 for (int i = 0; i < m_process_number; i++){
+                                    // 如果子进程关闭了，关闭相应通信通道，并设pid=-1表示该子进程已退出
                                     if(m_sub_process[i].m_pid == pid){
                                         printf("chlid %d join\n", i);
                                         close(m_sub_process[i].m_pipefd[0]);    // 关闭读
@@ -342,14 +348,15 @@ void processPool<T>::run_parent(){
                                     }
                                 }
                             }
-                            m_stop = true;
+                            m_stop = true;  // 关闭父进程
+                            // 循环关闭子进程
                             for (int i = 0; i < m_process_number; i++){
                                 if(m_sub_process[i].m_pid != -1)
                                     m_stop = false;
                             }
                             break;
                         }
-                        case SIGTERM;
+                        case SIGTERM:
                         case SIGINT:{
                             printf("kill all the child now\n");
                             for (int i = 0; i < m_process_number; i++)
