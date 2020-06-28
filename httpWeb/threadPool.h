@@ -29,7 +29,7 @@ public:
 
 // 构造
 template <typename T>
-threadPool<T>::threadPool(int threadNumber = 8, int maxRequests = 10000){
+threadPool<T>::threadPool(int threadNumber, int maxRequests){
     if((threadNumber <= 0) || (maxRequests <= 0)) throw std::exception();
     
     m_threads = new pthread_t[m_thread_number];

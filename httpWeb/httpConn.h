@@ -31,14 +31,14 @@ public:
     enum PARSE_STATE {PARSE_REQUESTLINE, PARSE_HEAD, PARSE_CONTENT};
     // 读取行状态（读到一行，不是行，未读完）
     enum LINE_STATE {LINE_OK = 0, LINE_BAD, LINE_OPEN};
-    // HTTP状态码(200、301、403、404、503) INTERNAL_ERROR(process_read)
-    enum HTTP_CODE {NO_REQUEST, GET_REQUEST, BAD_REQUEST, NO_RESOURCE, FORBIDEN, INTNET_ERROR, INTERNAL_ERROR, CLOSE_CONNECTION};
+    // HTTP状态码(200、301、403、404、503) INTERNAL_ERROR(process_read 500), FILE_REQUEST(200)
+    enum HTTP_CODE {NO_REQUEST, GET_REQUEST, BAD_REQUEST, NO_RESOURCE, FORBIDEN, FILE_REQUEST, INTNET_ERROR, INTERNAL_ERROR, CLOSE_CONNECTION};
     
     static int m_epollfd;
     static int m_user_count;
 
-    httpConn();
-    ~httpConn();
+    // httpConn();
+    // ~httpConn();
     void init(int sockfd, const sockaddr_in &addr);
     void closeConn(bool real_close = true);
     void process();
